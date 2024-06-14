@@ -1,308 +1,482 @@
-const { EmbedBuilder } = require("discord.js");
+/*
+    Original code was taken from: https://github.com/JustJacob95/sirus_loot_discord_bot
+*/
+
+const logger = require("../logger.js");
+const db = require("../db/db.js");
+const { initBrowser, browserGet } = require("../browserGetter.js");
+
+const { EmbedBuilder, ActivityType } = require("discord.js");
 const axios = require("axios");
-const puppeteer = require("puppeteer");
 const fs = require("fs");
 
-const latestFightsApi =
-    "https://sirus.su/api/base/33/leader-board/bossfights/latest?realm=33";
-const bossKillApi =
-    "https://sirus.su/api/base/33/leader-board/bossfights/boss-kill/";
+const API_BASE_URL = "https://sirus.su/api/base";
+const LATEST_FIGHTS_API = "progression/pve/latest-boss-kills";
+const BOSS_KILL_API = "details/bossfight";
+const GUILDS_URL = "https://sirus.su/base/guilds";
+const PVE_PROGRESS_URL = "https://sirus.su/base/pve-progression/boss-kill";
 
-const settingsFile = "./loot/loot.json";
-
-const tempPath = "./temp/";
-const recordsFile = tempPath + "records.json";
-
-const stylePath = "./styles/";
-const mainStyleFile = stylePath + "main.css";
-const otherStyleFile = stylePath + "other.css";
-
-const intervalUpdate = 1000 * 60 * 5;
-
-const bossThumbnails = {
-    "Разрушитель XT-002":
-        "https://wow.zamimg.com/images/wow/journal/ui-ej-boss-xt-002-deconstructor.png",
-    Фрея: "https://wow.zamimg.com/images/wow/journal/ui-ej-boss-freya.png",
-    Торим: "https://wow.zamimg.com/images/wow/journal/ui-ej-boss-thorim.png",
-    "Огненный Левиафан":
-        "https://wow.zamimg.com/images/wow/journal/ui-ej-boss-flame-leviathan.png",
-    Мимирон: "https://wow.zamimg.com/images/wow/journal/ui-ej-boss-mimiron.png",
-    "Гидросс Нестабильный":
-        "https://wow.zamimg.com/uploads/screenshots/small/30250.jpg",
-    Острокрылая:
-        "https://wow.zamimg.com/images/wow/journal/ui-ej-boss-razorscale.png",
-    "Повелитель Горнов Игнис":
-        "https://wow.zamimg.com/images/wow/journal/ui-ej-boss-ignis-the-furnace-master.png",
-    Ходир: "https://wow.zamimg.com/images/wow/journal/ui-ej-boss-hodir.png",
-    Кологарн:
-        "https://wow.zamimg.com/modelviewer/live/webthumbs/npc/222/28638.webp",
-    "Йогг-Сарон":
-        "https://wow.zamimg.com/images/wow/journal/ui-ej-boss-yogg-saron.png",
-    "Генерал Везакс":
-        "https://wow.zamimg.com/images/wow/journal/ui-ej-boss-general-vezax.png",
-    "Железное Собрание":
-        "https://wow.zamimg.com/uploads/screenshots/small/128853.jpg",
-    Ауриайя: "https://wow.zamimg.com/images/wow/journal/ui-ej-boss-auriaya.png",
-    "Кель'тас Солнечный Скиталец":
-        "https://wow.zamimg.com/uploads/screenshots/small/79291.jpg",
-    "Повелитель глубин Каратресс":
-        "https://wow.zamimg.com/uploads/screenshots/small/80609.jpg",
-    "Ал'ар": "https://wow.zamimg.com/uploads/screenshots/small/29018.jpg",
-    "Верховный звездочет Солариан":
-        "https://wow.zamimg.com/uploads/screenshots/small/53912.jpg",
-    "Страж Бездны":
-        "https://wow.zamimg.com/uploads/screenshots/small/47202.jpg",
-    "Леди Вайш": "https://wow.zamimg.com/uploads/screenshots/small/79290.jpg",
-    "Морогрим Волноступ":
-        "https://wow.zamimg.com/uploads/screenshots/small/28948.jpg",
-    "Скрытень из глубин":
-        "https://wow.zamimg.com/uploads/screenshots/small/81775.jpg",
-    "Алгалон Наблюдатель":
-        "https://wow.zamimg.com/uploads/screenshots/small/132856.jpg",
+const REALM_NAMES = {
+  9: "Scourge x2",
+  33: "Algalon x4",
+  42: "Soulseeker x1",
+  57: "Sirus x5",
+};
+const getRealmNameById = (realm_id) => {
+  if (REALM_NAMES[realm_id]) {
+    return REALM_NAMES[realm_id];
+  }
+  return null;
 };
 
-var client = undefined;
-var settings = {};
-var records = {};
+const LOOT_PATH = "./loot";
+const BOSS_THUMBNAILS_FILE = `${LOOT_PATH}/bossThumbnails.json`;
+const CLASS_EMOJI_FILE = `${LOOT_PATH}/classEmoji.json`;
+const BLACKLIST_FILE = `${LOOT_PATH}/blacklist.json`;
 
-var mainStyle = undefined;
-var otherStyle = undefined;
+const INTERVAL_UPDATE_MS = 1000 * 60 * 30;
+
+var client;
+var bossThumbnails = {};
+var classEmoji = {};
+var blacklist = [];
+
+var browser;
 
 function init(discord) {
-    client = discord;
+  client = discord;
 
-    loadSettings();
-    loadRecords();
-    loadStyles();
+  loadBossThumbnails();
+  loadClassEmoji();
+  loadBlacklist();
 
-    refreshLoot();
+  startRefreshingLoot();
 }
 
-function setLootChannel(guild_id, channel_id, guild_sirus_id) {
-    if (settings[guild_id] === undefined) {
-        settings[guild_id] = {};
+function loadBossThumbnails() {
+  logger.info(`Load boss thumbnails from ${BOSS_THUMBNAILS_FILE}`);
+  try {
+    bossThumbnails = JSON.parse(fs.readFileSync(BOSS_THUMBNAILS_FILE, "utf8"));
+    logger.info(
+      `Boss thumbnails successfully loaded from ${BOSS_THUMBNAILS_FILE}`
+    );
+  } catch (error) {
+    logger.error(error);
+    logger.warn(`Can't load ${BOSS_THUMBNAILS_FILE}`);
+  }
+}
+
+function loadClassEmoji() {
+  logger.info(`Load class emoji from ${CLASS_EMOJI_FILE}`);
+  try {
+    classEmoji = JSON.parse(fs.readFileSync(CLASS_EMOJI_FILE, "utf8"));
+    logger.info(`Class emoji successfully loaded from ${CLASS_EMOJI_FILE}`);
+  } catch (error) {
+    logger.error(error);
+    logger.warn(`Can't load ${CLASS_EMOJI_FILE}`);
+  }
+}
+
+function loadBlacklist() {
+  logger.info(`Load loot blacklist from ${BLACKLIST_FILE}`);
+  try {
+    blacklist = JSON.parse(fs.readFileSync(BLACKLIST_FILE, "utf8"));
+    logger.info(`Blacklist successfully loaded from ${BLACKLIST_FILE}`);
+  } catch (error) {
+    logger.error(error);
+    logger.warn(`Can't load ${BLACKLIST_FILE}`);
+  }
+}
+
+async function startRefreshingLoot() {
+  logger.info("Refreshing loot started");
+
+  client.user.setPresence({
+    activities: [
+      { name: `Обрабатываю киллы боссов`, type: ActivityType.Custom },
+    ],
+    status: "dnd",
+  });
+
+  browser = await initBrowser();
+
+  const settings = await db.getLootSettings();
+  if (!settings) {
+    logger.warn("Can't load loot settings from DB");
+    setTimeout(startRefreshingLoot, INTERVAL_UPDATE_MS);
+    return;
+  }
+
+  const entry_promises = [];
+  for (const entry of settings) {
+    const guild_id = await db.getGuildIdByLootId(entry._id);
+    if (!guild_id) {
+      continue;
     }
-    settings[guild_id]["channel_id"] = channel_id;
-    settings[guild_id]["guild_sirus_id"] = guild_sirus_id;
-    fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 4), "utf8");
+    entry_promises.push(entryProcess(entry, guild_id));
+  }
+  await Promise.all(entry_promises);
+
+  await browser.close();
+  browser = null;
+
+  client.user.setPresence({
+    activities: [{ name: `Чилю`, type: ActivityType.Custom }],
+    status: "online",
+  });
+  logger.info("Refreshing loot ended");
+
+  setTimeout(startRefreshingLoot, INTERVAL_UPDATE_MS);
 }
 
-function loadSettings() {
-    console.log(`[LOG] Load settings from ${settingsFile}`);
-    try {
-        settings = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
-        console.log(`[LOG] Settings successfully loaded from ${settingsFile}`);
-    } catch (error) {
-        console.error(error);
-        console.log(`[WARNING] Can't parse ${settingsFile}`);
-    }
-}
+async function entryProcess(entry, guild_id) {
+  let response;
+  try {
+    const api_url = `${API_BASE_URL}/${entry.realm_id}/${LATEST_FIGHTS_API}?guild=${entry.guild_sirus_id}&lang=ru`;
 
-function loadRecords() {
-    console.log(`[LOG] Load records from ${recordsFile}`);
-    try {
-        if (!fs.existsSync(tempPath)) {
-            fs.mkdirSync(tempPath);
-        }
-        records = JSON.parse(fs.readFileSync(recordsFile, "utf8"));
-        console.log(`[LOG] Records successfully loaded from ${recordsFile}`);
-    } catch (error) {
-        console.error(error);
-        console.log(`[WARNING] Can't parse ${recordsFile}`);
-    }
-}
+    response = await browserGet(browser, api_url);
 
-function loadStyles() {
-    console.log(`[LOG] Load style from ${mainStyleFile}`);
-    try {
-        mainStyle = fs.readFileSync(mainStyleFile, "utf8");
-        console.log(`[LOG] Style successfully loaded from ${mainStyleFile}`);
-    } catch (error) {
-        console.error(error);
-        console.log(`[WARNING] Can't load ${mainStyleFile}`);
-    }
+    // response = (
+    //   await axios.get(api_url, {
+    //     headers: { "accept-encoding": null },
+    //     cache: true,
+    //   })
+    // ).data;
+  } catch (error) {
+    logger.error(error);
+    logger.warn(
+      `Can't get loot from realm ${getRealmNameById(
+        entry.realm_id
+      )} with guild sirus id ${entry.guild_sirus_id}`
+    );
+    return;
+  }
 
-    console.log(`[LOG] Load style from ${otherStyleFile}`);
-    try {
-        otherStyle = fs.readFileSync(otherStyleFile, "utf8");
-        console.log(`[LOG] Style successfully loaded from ${otherStyleFile}`);
-    } catch (error) {
-        console.error(error);
-        console.log(`[WARNING] Can't load ${otherStyleFile}`);
-    }
-}
+  const first_init = await db.initRecords(guild_id);
+  const records = response.data;
+  const sended_records = [];
+  const promises = [];
 
-async function refreshLoot() {
-    axios
-        .get(latestFightsApi, {
-            headers: { "accept-encoding": null },
-            cache: true,
-        })
-        .then(async (response) => {
-            Promise.all(
-                response.data.data.map(async (record) =>
-                    getExtraInfoWrapper(record)
-                )
-            ).then(() => {
-                fs.writeFileSync(
-                    recordsFile,
-                    JSON.stringify(records, null, 4),
-                    "utf8"
-                );
-            });
-        })
-        .catch(console.error);
-
-    getExtraInfo(773971)
-        .then(async (message) => {
-            client.channels.cache.get("1089077448429277204").send(message);
-            //records[guild_id].push(record.id);
-        })
-        .catch(console.error);
-
-    setTimeout(refreshLoot, intervalUpdate);
-}
-
-async function getExtraInfoWrapper(record) {
-    for (const [guild_id, entry] of Object.entries(settings)) {
-        if (records[guild_id] === undefined) {
-            records[guild_id] = [];
-        }
-        if (
-            record.guildId === entry.guild_sirus_id &&
-            records[guild_id].indexOf(record.id) < 0 &&
-            record.boss_name
-        ) {
-            await getExtraInfo(record.id)
-                .then(async (message) => {
-                    client.channels.cache.get(entry.channel_id).send(message);
-                    records[guild_id].push(record.id);
-                })
-                .catch(console.error);
-        }
-    }
-}
-
-async function getExtraInfo(recordId) {
-    return new Promise(async (resolve, reject) => {
-        let fileName = [...Array(10)]
-            .map((i) => (~~(Math.random() * 36)).toString(36))
-            .join("");
-
-        let responseBossKillInfo = await axios.get(bossKillApi + recordId, {
-            headers: { "accept-encoding": null },
-            cache: true,
-        });
-        let dataBossKillInfo = responseBossKillInfo.data;
-        // console.log(dataBossKillInfo);
-
-        let lootHtml = await Promise.all(
-            dataBossKillInfo.data.loots.map((loot) => getLootInfo(loot.item))
-        ).catch(console.error);
-
-        let hasLootInfo = false;
-
-        lootHtml = lootHtml.join().replaceAll(",", "");
-
-        if (lootHtml) {
-            let html =
-                '<!doctype html> <html><body><div style="display: flex; justify-content: center;">';
-            hasLootInfo = true;
-            html += lootHtml + "</div></body></html>";
-            await takeSceenshot(html, fileName);
-        }
-
-        let exampleEmbed = new EmbedBuilder()
-            .setColor("#0099ff")
-            .setTitle("Упал босс " + dataBossKillInfo.data.boss_name)
-            .setURL(
-                "https://sirus.su/base/pve-progression/boss-kill/33/" + recordId
-            )
-            .addFields(
-                {
-                    name: "Попытки",
-                    value: dataBossKillInfo.data.attempts.toString(),
-                    inline: true,
-                },
-                {
-                    name: "Когда убили",
-                    value: dataBossKillInfo.data.killed_at,
-                    inline: true,
-                },
-                {
-                    name: "Время убийства",
-                    value: dataBossKillInfo.data.fight_length,
-                    inline: true,
-                }
-            );
-
-        if (bossThumbnails[dataBossKillInfo.boss_name] !== undefined) {
-            exampleEmbed.setThumbnail(
-                bossThumbnails[dataBossKillInfo.boss_name]
-            );
-        }
-
-        if (hasLootInfo) {
-            exampleEmbed.addFields({
-                name: "Лут: ",
-                value: "\u200b",
-                inline: false,
-            });
-            exampleEmbed.setImage("attachment://" + fileName + ".png");
-            resolve({
-                embeds: [exampleEmbed],
-                files: [
-                    {
-                        attachment: "./images/" + fileName + ".png",
-                        name: fileName + ".png",
-                    },
-                ],
-            });
-            // await channel.send();
-        } else {
-            resolve({ embeds: [exampleEmbed] });
-            // await channel.send();
-        }
-    });
-}
-
-async function getLootInfo(item) {
-    if (item.inventory_type && item.quality >= 4 && item.level >= 0) {
-        let responseLoot = await fetch(
-            "https://sirus.su/api/tooltips/item/" + item.entry + "/33"
-        );
-        let html = await responseLoot.text();
-        return html.trim();
+  for (const record of records) {
+    if (first_init) {
+      sended_records.push(record.id);
     } else {
-        return "";
+      promises.push(getExtraInfoWrapper(entry, guild_id, record));
     }
+  }
+
+  if (promises.length > 0) {
+    const record_ids = await Promise.all(promises);
+    sended_records.push(...record_ids.filter(Boolean));
+  }
+
+  if (sended_records.length > 0) {
+    await db.pushRecords(guild_id, sended_records);
+  }
 }
 
-async function takeSceenshot(html, fileName) {
-    const browser = await puppeteer.launch({
-        headless: true,
-        args: ["--no-sandbox", "--window-size=1400,695"],
-        defaultViewport: null
-    });
-    const page = await browser.newPage();
-    const options = {
-        path: "images/" + fileName + ".png",
-        fullPage: false,
-        omitBackground: true,
-    };
-    await page.setContent(html);
-    await page.addStyleTag({ content: mainStyle });
-    await page.addStyleTag({ content: otherStyle });
-    await page.addStyleTag({
-        content:
-            ".s-wow-tooltip-body{margin-right: 15px;margin-bottom: 15px;border: 1px solid #737373;padding: 10px;}.s-wow-tooltip-body:last-child{margin-right: 0px}",
-    });
-    // await page.send('Emulation.clearDeviceMetricsOverride');
-    await page.screenshot(options);
-    await browser.close();
+async function getExtraInfoWrapper(entry, guild_id, record) {
+  if (!client.guilds.cache.get(guild_id)) {
+    return null;
+  }
+
+  if (!(await db.checkRecord(guild_id, record.id))) {
+    try {
+      const message = await getExtraInfo(guild_id, record.id, entry.realm_id);
+      if (!message) {
+        throw new Error("Empty message getted!");
+      }
+
+      const channel = client.guilds.cache
+        .get(guild_id)
+        .channels.cache.get(entry.channel_id);
+      if (!channel || !channel.send) {
+        throw new Error(`Can't get channel with id: ${entry.channel_id}`);
+      }
+
+      channel.send(message).catch((err) => logger.error(err));
+      return record.id;
+    } catch (error) {
+      logger.error(error);
+      logger.warn(
+        "Error while getting loot info:" +
+          `{ guild_id: ${guild_id}, channel_id: ${entry.channel_id} }`
+      );
+    }
+  }
+  return null;
+}
+
+async function getExtraInfo(guild_id, record_id, realm_id) {
+  let data_boss_kill_info;
+  try {
+    const api_url = `${API_BASE_URL}/${realm_id}/${BOSS_KILL_API}/${record_id}?lang=ru`;
+    let response;
+
+    response = await browserGet(browser, api_url);
+
+    // response = (
+    //   await axios.get(api_url, {
+    //     headers: { "accept-encoding": null },
+    //     cache: true,
+    //   })
+    // ).data;
+
+    data_boss_kill_info = response.data;
+  } catch (error) {
+    logger.error(error);
+    return;
+  }
+
+  const realm_name = getRealmNameById(realm_id);
+  let embed_message = new EmbedBuilder()
+    .setColor("#0099ff")
+    .setAuthor({
+      name:
+        `${data_boss_kill_info.guild.name}` +
+        (realm_name ? ` - ${realm_name}` : ""),
+      iconURL: client.guilds.cache.get(guild_id).iconURL(),
+      url: `${GUILDS_URL}/${realm_id}/${data_boss_kill_info.guild.entry}`,
+    })
+    .setTitle(`Убийство босса ${data_boss_kill_info.boss_name}`)
+    .setURL(`${PVE_PROGRESS_URL}/${realm_id}/${record_id}`)
+    .setFooter({
+      text: "Юи, Ваш ассистент",
+      iconURL: "https://i.imgur.com/LvlhrPY.png",
+    })
+    .addFields(
+      {
+        name: "Попытки",
+        value: `${data_boss_kill_info.attempts}`,
+        inline: true,
+      },
+      {
+        name: "Когда убили",
+        value: data_boss_kill_info.killed_at,
+        inline: true,
+      },
+      {
+        name: "Время боя",
+        value: data_boss_kill_info.fight_length,
+        inline: true,
+      }
+    );
+
+  if (data_boss_kill_info.boss_name in bossThumbnails) {
+    embed_message.setThumbnail(bossThumbnails[data_boss_kill_info.boss_name]);
+  }
+
+  const [places_dps, players_dps, dps, summary_dps] = parseDpsPlayers(
+    data_boss_kill_info.players
+  );
+  if (places_dps && players_dps && dps && summary_dps) {
+    embed_message
+      .addFields({
+        name: "\u200b",
+        value: "\u200b",
+      })
+      .addFields(
+        {
+          name: "\u200b",
+          value: "\u200b",
+          inline: true,
+        },
+        {
+          name: "\u200b",
+          value: "\u200b",
+          inline: true,
+        },
+        {
+          name: "Общий DPS",
+          value: `${intToShortFormat(summary_dps)}k`,
+          inline: true,
+        }
+      )
+      .addFields(
+        {
+          name: "Место",
+          value: places_dps,
+          inline: true,
+        },
+        {
+          name: "Имя",
+          value: players_dps,
+          inline: true,
+        },
+        {
+          name: "DPS",
+          value: dps,
+          inline: true,
+        }
+      );
+  }
+
+  const [places_heal, players_heal, hps, summary_hps] = parseHealPlayers(
+    data_boss_kill_info.players
+  );
+  if (places_heal && places_heal && hps && summary_hps) {
+    embed_message
+      .addFields({
+        name: "\u200b",
+        value: "\u200b",
+      })
+      .addFields(
+        {
+          name: "\u200b",
+          value: "\u200b",
+          inline: true,
+        },
+        {
+          name: "\u200b",
+          value: "\u200b",
+          inline: true,
+        },
+        {
+          name: "Общий HPS",
+          value: `${intToShortFormat(summary_hps)}k`,
+          inline: true,
+        }
+      )
+      .addFields(
+        {
+          name: "Место",
+          value: places_heal,
+          inline: true,
+        },
+        {
+          name: "Имя",
+          value: players_heal,
+          inline: true,
+        },
+        {
+          name: "HPS",
+          value: hps,
+          inline: true,
+        }
+      );
+  }
+
+  let loot_str = "";
+  try {
+    await Promise.all(
+      data_boss_kill_info.loots.map((loot) => {
+        if (loot.item.quality >= 4 && !blacklist.includes(loot.item.entry)) {
+          loot_str += `${loot.item.name}\n`;
+        }
+      })
+    );
+  } catch (error) {
+    logger.error(error);
+    logger.warning("Shit happens...");
+    return;
+  }
+  if (loot_str !== "") {
+    embed_message
+      .addFields({
+        name: "\u200b",
+        value: "\u200b",
+      })
+      .addFields({
+        name: "Лут",
+        value: loot_str,
+      });
+  }
+
+  return { embeds: [embed_message] };
+}
+
+function parseDpsPlayers(data) {
+  // Furatoru - x5
+  const easterEgg = ["Furatoru"];
+  const easterEggEmojiId = "1067786576639295488";
+
+  data.sort((a, b) => b.dps - a.dps);
+
+  let i = 1;
+  let places = "";
+  let players = "";
+  let dps = "";
+  let summary_dps = 0;
+
+  for (const player of data) {
+    let emoji;
+    try {
+      const spec = classEmoji[player.class_id].spec[player.spec];
+      if (spec.heal) continue;
+      if (easterEgg.find((item) => item === player.name)) {
+        emoji = client.emojis.cache.get(easterEggEmojiId);
+      } else {
+        emoji = client.emojis.cache.get(spec.emoji_id);
+      }
+    } catch (error) {
+      logger.error(error);
+      logger.warn(`Can't get emoji for ${player.name}`);
+    }
+
+    places += `**${i++}**\n`;
+
+    players += (emoji ? `${emoji}` : "") + `${player.name}\n`;
+
+    const dps_int = parseInt(player.dps);
+    if (dps_int) {
+      dps += `${intToShortFormat(dps_int)}k\n`;
+      summary_dps += dps_int;
+    } else {
+      dps += "0k\n";
+    }
+  }
+
+  if (places === "" || players === "" || dps === "") {
+    return ["\u200b", "\u200b", "\u200b", 0];
+  }
+
+  return [places, players, dps, summary_dps];
+}
+
+function parseHealPlayers(data) {
+  data.sort((a, b) => b.hps - a.hps);
+
+  let i = 1;
+  let places = "";
+  let players = "";
+  let hps = "";
+  let summary_hps = 0;
+
+  for (const player of data) {
+    let emoji;
+    try {
+      const spec = classEmoji[player.class_id].spec[player.spec];
+      if (!spec.heal) continue;
+      emoji = client.emojis.cache.get(spec.emoji_id);
+    } catch (error) {
+      logger.error(error);
+      logger.warn(`Can't get emoji for ${player.name}`);
+    }
+
+    places += `**${i++}**\n`;
+
+    players += (emoji ? `${emoji}` : "") + `${player.name}\n`;
+
+    const hpsInt = parseInt(player.hps);
+    if (hpsInt) {
+      hps += `${intToShortFormat(hpsInt)}k\n`;
+      summary_hps += hpsInt;
+    } else {
+      hps += "0k\n";
+    }
+  }
+
+  if (places === "" || players === "" || hps === "") {
+    return ["\u200b", "\u200b", "\u200b", 0];
+  }
+
+  return [places, players, hps, summary_hps];
+}
+
+function intToShortFormat(value) {
+  return +(value.toFixed(1) / 1000).toFixed(1);
 }
 
 module.exports = {
-    init: init,
-    setLootChannel: setLootChannel,
+  init: init,
 };

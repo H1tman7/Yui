@@ -1,10 +1,5 @@
-
 .env
+.prettierrc
 node_modules
 package-lock.json
-temp
-changelog/*.json
-loot/*.json
-!images/icons/*
-images/*
-.prettierrc
+data
